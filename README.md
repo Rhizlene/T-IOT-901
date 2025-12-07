@@ -10,21 +10,21 @@ Le projet inclut firmware, électronique et intégration API.
 
 
 
-# 🚀 README — Installation & Configuration du Projet Convoyeur (Dolibarr + M5Stack)
+# README — Installation & Configuration du Projet Convoyeur (Dolibarr + M5Stack)
 
 Ce document explique comment installer et configurer l’environnement nécessaire pour faire fonctionner le **M5Stack** avec l’API REST de **Dolibarr**, via Docker.  
 Il couvre aussi la configuration réseau afin de permettre la communication ESP32 → API → Base de données.
 
 ---
 
-## 📌 1. Prérequis
+## 1. Prérequis
 
-### 🖥️ Logiciels nécessaires
+### Logiciels nécessaires
 - **Docker Desktop** installé  
 - **PlatformIO** (VSCode avec extension PlatformIO)
 - **Driver USB CP210x** (pour que Windows reconnaisse le M5Stack)
 
-### 🔧 Matériel
+### Matériel
 - M5Stack (Fire / Core2 / Basic)
 - Câble USB Type-C fonctionnel
 - Connexion Wi-Fi en **2,4 GHz**
@@ -32,7 +32,7 @@ Il couvre aussi la configuration réseau afin de permettre la communication ESP3
 
 ---
 
-## 📦 2. Installation de Dolibarr via Docker
+## 2. Installation de Dolibarr via Docker
 
 Dans le dossier du projet, exécuter :
 
@@ -45,13 +45,13 @@ Cela démarre automatiquement :
 - un **Dolibarr** opérationnel
 - un **phpMyAdmin** pour visualiser la base
 
-### 📌 URLs par défaut :
+### URLs par défaut :
 | Service | URL |
 |--------|------|
 | Dolibarr | http://localhost:8080 |
 | phpMyAdmin | http://localhost:8081 |
 
-### 🔑 Identifiants par défaut :
+### Identifiants par défaut :
 - Dolibarr : `admin / admin`  
 - phpMyAdmin : `root / root`
 
@@ -63,7 +63,7 @@ Cela démarre automatiquement :
 
 ---
 
-## 🔑 3. Configuration de l’API Dolibarr
+## 3. Configuration de l’API Dolibarr
 
 Dans Dolibarr :
 
@@ -83,14 +83,14 @@ const char* DOLAPIKEY = "TA_CLE_API_ICI";
 
 ---
 
-## 📶 4. Configuration réseau (IMPORTANT)
+## 4. Configuration réseau (IMPORTANT)
 
 Le M5Stack doit être sur **le même réseau que ton PC**.  
 Deux options :
 
 ---
 
-### ✔️ OPTION 1 — Hotspot du téléphone (recommandé)
+### OPTION 1 — Hotspot du téléphone (recommandé)
 
 1. Activer le partage Wi-Fi sur le smartphone  
 2. SSID conseillé : `M5_TEST`  
@@ -104,14 +104,14 @@ ipconfig
 
 ---
 
-### ✔️ OPTION 2 — Réseau local simple (box internet)
+### OPTION 2 — Réseau local simple (box internet)
 
 ⚠️ Ne fonctionne pas dans la plupart des écoles :  
 les réseaux type IONIS utilisent WPA2-Enterprise et l’ESP32 ne peut pas s’y connecter.
 
 ---
 
-## 🔌 5. Installation du driver USB CP210x (Windows)
+## 5. Installation du driver USB CP210x (Windows)
 
 Si le M5Stack n’apparaît pas sur COM :
 
@@ -132,7 +132,7 @@ CP210x USB to UART Bridge (COM3)
 
 ---
 
-## 🔥 6. Upload du firmware dans le M5Stack
+## 6. Upload du firmware dans le M5Stack
 
 Via PlatformIO :
 
@@ -141,3 +141,20 @@ CTRL + ALT + U  (Upload)
 CTRL + ALT + M  (Monitor série)
 ```
 
+## 7. Schéma d’architecture du système
+
+```mermaid
+graph LR
+  U[Utilisateur] --> M5
+
+  subgraph Convoyeur_physique
+    M5 --> GRBL
+    M5 --> GOPLUS
+    M5 --> RFID
+    GRBL --> MOTEUR
+    GOPLUS --> SERVO
+  end
+
+  M5 --> API
+  API --> DB
+```
