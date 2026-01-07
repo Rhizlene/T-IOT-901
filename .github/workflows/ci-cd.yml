@@ -11,15 +11,14 @@ name: CI/CD Firmware
 on:
   # CI : Déclenché à chaque push ou pull request
   push:
-    branches: [ main, principal, develop ]
+    branches: [ '**' ]
     tags:
       - 'v*'  # Déclenche aussi le CD quand on push un tag
     paths:
       - 'firmware/**'
-      - 'firmware/**'
       - '.github/workflows/**'
   pull_request:
-    branches: [ main, principal ]
+    branches: [ '**' ]
 
 jobs:
   # ===========================================================================
@@ -132,7 +131,7 @@ jobs:
           generate_release_notes: true
           body: |
             ## 📦 Firmware ${{ github.ref_name }}
-            
+
             ### Installation
             ```bash
             esptool.py write_flash 0x10000 conveyor_${{ github.ref_name }}.bin
