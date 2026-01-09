@@ -2,10 +2,11 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 
-const char* WIFI_SSID     = "IONIS";
-const char* WIFI_PASSWORD = "8ggZ-UsD";
 
-const char* DOLIBARR_HOST = "10.79.216.117";
+const char* WIFI_SSID     = "Finv";
+const char* WIFI_PASSWORD = "17082020";
+
+const char* DOLIBARR_HOST = "172.22.27.165";
 const char* DOLAPIKEY     = "1ZtIVnP5bQ9QMK983qXoii1kd3c72dRQ";
 
 void connectWiFi() {
