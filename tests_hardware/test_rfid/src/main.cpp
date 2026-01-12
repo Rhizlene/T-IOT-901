@@ -1,75 +1,16 @@
+/*
+ * M5Stack RFID 2 Unit Test
+ * Using official M5Stack MFRC522 I2C library
+ */
+
 #include <M5Stack.h>
 #include <Wire.h>
+#include "MFRC522_I2C.h"
 
-// M5Stack RFID Unit - try multiple protocols
+// M5Stack RFID 2 Unit I2C address
 #define RFID_I2C_ADDR 0x28
 
-// UART mode
-HardwareSerial RFIDSerial(2);  // Use Serial2
-
-bool useUART = false;
-
-// Function to read UID via I2C
-String readRFIDCard_I2C() {
-    Wire.requestFrom(RFID_I2C_ADDR, 8);
-
-    if (Wire.available() < 8) {
-        return "";
-    }
-
-    uint8_t data[8];
-    for (int i = 0; i < 8; i++) {
-        data[i] = Wire.read();
-    }
-
-    // Check for valid data
-    if (data[0] == 0x01 && data[1] > 0 && data[1] <= 7) {
-        String uid = "";
-        for (int i = 0; i < data[1] && i < 5; i++) {
-            if (data[2 + i] < 0x10) uid += "0";
-            uid += String(data[2 + i], HEX);
-            if (i < data[1] - 1 && i < 4) uid += ":";
-        }
-        uid.toUpperCase();
-        return uid;
-    }
-
-    return "";
-}
-
-// Function to read UID via UART
-String readRFIDCard_UART() {
-    if (RFIDSerial.available() >= 8) {
-        uint8_t data[14];
-        int count = 0;
-
-        while (RFIDSerial.available() && count < 14) {
-            data[count++] = RFIDSerial.read();
-        }
-
-        // Look for hex UID in ASCII format
-        String response = "";
-        for (int i = 0; i < count; i++) {
-            if (data[i] >= '0' && data[i] <= '9' || data[i] >= 'A' && data[i] <= 'F' || data[i] >= 'a' && data[i] <= 'f') {
-                response += (char)data[i];
-            }
-        }
-
-        if (response.length() >= 8) {
-            String uid = "";
-            for (int i = 0; i < response.length() && i < 14; i++) {
-                uid += response.charAt(i);
-                if (i % 2 == 1 && i < response.length() - 1) {
-                    uid += ":";
-                }
-            }
-            uid.toUpperCase();
-            return uid;
-        }
-    }
-
-    return "";
-}
+MFRC522 mfrc522(RFID_I2C_ADDR);
 
 void setup() {
     M5.begin();
@@ -79,183 +20,150 @@ void setup() {
     M5.Lcd.fillScreen(BLACK);
     M5.Lcd.setTextSize(2);
     M5.Lcd.setCursor(10, 10);
-    M5.Lcd.println("=== RFID TEST ===");
-    M5.Lcd.println("Multi-Protocol");
+    M5.Lcd.println("=== RFID 2 TEST ===");
+    M5.Lcd.println("Lib: M5Stack MFRC522");
 
-    Serial.println("\n============================");
-    Serial.println("  RFID Unit Test (I2C+UART)");
-    Serial.println("============================");
+    Serial.println("\n=============================");
+    Serial.println("  M5Stack RFID 2 Unit Test");
+    Serial.println("  Using M5Stack MFRC522 I2C");
+    Serial.println("=============================\n");
 
-    // Initialize I2C
+    // Initialize I2C on Port A (GPIO 21 SDA, GPIO 22 SCL)
     Wire.begin(21, 22);
-    Wire.setClock(100000);
+    Wire.setClock(100000);  // 100kHz I2C
 
     Serial.println("Scanning I2C bus...");
-    M5.Lcd.println("Scanning I2C...");
 
+    // Scan I2C bus
     int deviceCount = 0;
     for (uint8_t addr = 1; addr < 127; addr++) {
         Wire.beginTransmission(addr);
         if (Wire.endTransmission() == 0) {
-            Serial.print("Device at 0x");
+            Serial.print("  Device at 0x");
             if (addr < 0x10) Serial.print("0");
-            Serial.println(addr, HEX);
+            Serial.print(addr, HEX);
+            
+            if (addr == RFID_I2C_ADDR) {
+                Serial.print(" <- RFID 2 Unit");
+            }
+            Serial.println();
             deviceCount++;
         }
     }
-
     Serial.print("Found ");
     Serial.print(deviceCount);
     Serial.println(" I2C device(s)\n");
 
-    // Check for RFID at 0x28
-    Wire.beginTransmission(RFID_I2C_ADDR);
-    if (Wire.endTransmission() == 0) {
-        Serial.println("Device found at 0x28 - trying I2C mode");
-        M5.Lcd.println("I2C Mode");
-        useUART = false;
+    // Initialize MFRC522
+    Serial.println("Initializing MFRC522...");
+    mfrc522.PCD_Init();
+    delay(100);
 
-        // Send init commands
-        Serial.println("Sending init commands...");
-        uint8_t initCmds[][4] = {
-            {0x00, 0x00, 0x00, 0x00},
-            {0x01, 0x00, 0x00, 0x00},
-            {0xFF, 0x00, 0x00, 0x00},
-        };
-
-        for (int i = 0; i < 3; i++) {
-            Wire.beginTransmission(RFID_I2C_ADDR);
-            Wire.write(initCmds[i], 4);
-            Wire.endTransmission();
-            delay(100);
-        }
+    // Check firmware version
+    byte version = mfrc522.PCD_ReadRegister(mfrc522.VersionReg);
+    Serial.print("MFRC522 Firmware Version: 0x");
+    Serial.print(version, HEX);
+    if (version == 0x91 || version == 0x92) {
+        Serial.println(" (OK)");
+    } else if (version == 0x88) {
+        Serial.println(" (FM17522 clone)");
+    } else if (version == 0x00 || version == 0xFF) {
+        Serial.println(" (Communication error!)");
     } else {
-        Serial.println("No I2C device at 0x28 - trying UART mode");
-        M5.Lcd.println("UART Mode");
-        useUART = true;
-
-        // Initialize UART on pins 21 (RX) and 22 (TX)
-        RFIDSerial.begin(9600, SERIAL_8N1, 21, 22);
-        delay(500);
+        Serial.println(" (Unknown version)");
     }
 
-    M5.Lcd.setTextColor(GREEN);
-    M5.Lcd.println("Ready!");
-    M5.Lcd.setTextColor(WHITE);
-    M5.Lcd.println("");
-    M5.Lcd.println("Place card...");
+    // Set antenna gain to maximum
+    mfrc522.PCD_SetAntennaGain(mfrc522.RxGain_max);
+    Serial.print("Antenna Gain: 0x");
+    Serial.println(mfrc522.PCD_GetAntennaGain(), HEX);
 
-    Serial.println("\n>>> Ready to scan <<<");
-    Serial.println(">>> Place card near reader <<<\n");
+    Serial.println("\n>>> Ready to scan! <<<");
+    Serial.println(">>> Place NFC tag on reader <<<\n");
+
+    M5.Lcd.setTextColor(GREEN);
+    M5.Lcd.println("\nRFID Ready!");
+    M5.Lcd.setTextColor(WHITE);
+    M5.Lcd.println("\nPlace card on");
+    M5.Lcd.println("RFID 2 Unit...");
 }
 
 String lastUID = "";
-unsigned long lastReadTime = 0;
-unsigned long lastDebugTime = 0;
+unsigned long lastDisplayTime = 0;
 
 void loop() {
     M5.update();
 
-    unsigned long currentTime = millis();
-
-    // Debug output every 2 seconds
-    if (currentTime - lastDebugTime > 2000) {
-        lastDebugTime = currentTime;
-
-        if (!useUART) {
-            // I2C debug
-            Wire.requestFrom(RFID_I2C_ADDR, 8);
-            if (Wire.available() >= 8) {
-                uint8_t rawData[8];
-                for (int i = 0; i < 8; i++) {
-                    rawData[i] = Wire.read();
-                }
-
-                Serial.print("[I2C] Raw: ");
-                for (int i = 0; i < 8; i++) {
-                    if (rawData[i] < 0x10) Serial.print("0");
-                    Serial.print(rawData[i], HEX);
-                    Serial.print(" ");
-                }
-
-                Serial.print("| Card: ");
-                Serial.print(rawData[0] == 0x01 ? "YES" : "NO");
-                Serial.print(" | UID Len: ");
-                Serial.print(rawData[1]);
-
-                if (rawData[0] == 0x01 && rawData[1] > 0 && rawData[1] <= 7) {
-                    Serial.print(" | UID: ");
-                    for (int i = 0; i < rawData[1] && i < 5; i++) {
-                        if (rawData[2 + i] < 0x10) Serial.print("0");
-                        Serial.print(rawData[2 + i], HEX);
-                        if (i < rawData[1] - 1 && i < 4) Serial.print(":");
-                    }
-                }
-                Serial.println();
-            }
-        } else {
-            // UART debug
-            if (RFIDSerial.available() > 0) {
-                Serial.print("[UART] Available: ");
-                Serial.print(RFIDSerial.available());
-                Serial.print(" bytes | Data: ");
-
-                String data = "";
-                while (RFIDSerial.available()) {
-                    uint8_t b = RFIDSerial.read();
-                    if (b < 0x10) Serial.print("0");
-                    Serial.print(b, HEX);
-                    Serial.print(" ");
-                    data += (char)b;
-                }
-                Serial.print("| ASCII: '");
-                Serial.print(data);
-                Serial.println("'");
-            } else {
-                Serial.println("[UART] No data");
-            }
-        }
+    // Look for new cards
+    if (!mfrc522.PICC_IsNewCardPresent()) {
+        delay(50);
+        return;
     }
 
-    // Try to read card
-    if (currentTime - lastReadTime > 200) {
-        lastReadTime = currentTime;
-
-        String uid = useUART ? readRFIDCard_UART() : readRFIDCard_I2C();
-
-        if (uid.length() > 0 && uid != lastUID) {
-            lastUID = uid;
-
-            M5.Lcd.fillRect(0, 120, 320, 120, BLACK);
-            M5.Lcd.setCursor(10, 120);
-            M5.Lcd.setTextColor(YELLOW);
-            M5.Lcd.println("CARD DETECTED!");
-
-            Serial.println("\n========== CARD DETECTED ==========");
-            Serial.print("UID: ");
-            Serial.println(uid);
-            Serial.println("===================================\n");
-
-            M5.Lcd.setTextColor(WHITE);
-            M5.Lcd.print("UID: ");
-            M5.Lcd.println(uid);
-
-            M5.Lcd.setTextColor(GREEN);
-            M5.Lcd.println("Success!");
-
-            delay(1500);
-
-            M5.Lcd.fillRect(0, 120, 320, 120, BLACK);
-            M5.Lcd.setCursor(10, 120);
-            M5.Lcd.setTextColor(WHITE);
-            M5.Lcd.println("Place next card...");
-
-        } else if (uid.length() == 0 && lastUID.length() > 0) {
-            if (currentTime - lastReadTime > 1000) {
-                lastUID = "";
-            }
-        }
+    // Select one of the cards
+    if (!mfrc522.PICC_ReadCardSerial()) {
+        delay(50);
+        return;
     }
 
-    delay(50);
+    // Build UID string
+    String uidStr = "";
+    for (byte i = 0; i < mfrc522.uid.size; i++) {
+        if (mfrc522.uid.uidByte[i] < 0x10) {
+            uidStr += "0";
+        }
+        uidStr += String(mfrc522.uid.uidByte[i], HEX);
+        if (i < mfrc522.uid.size - 1) {
+            uidStr += ":";
+        }
+    }
+    uidStr.toUpperCase();
+
+    // Avoid duplicate reads
+    if (uidStr != lastUID || millis() - lastDisplayTime > 2000) {
+        lastUID = uidStr;
+        lastDisplayTime = millis();
+
+        // Print to Serial
+        Serial.println("================================");
+        Serial.print("Card UID: ");
+        Serial.println(uidStr);
+        Serial.print("UID Size: ");
+        Serial.print(mfrc522.uid.size);
+        Serial.println(" bytes");
+        
+        // Get card type
+        byte piccType = mfrc522.PICC_GetType(mfrc522.uid.sak);
+        Serial.print("Card Type: ");
+        Serial.println(mfrc522.PICC_GetTypeName(piccType));
+        Serial.println("================================\n");
+
+        // Beep
+        M5.Speaker.tone(1000, 100);
+
+        // Display on LCD
+        M5.Lcd.fillScreen(BLACK);
+        M5.Lcd.setCursor(10, 10);
+        M5.Lcd.setTextColor(GREEN);
+        M5.Lcd.setTextSize(2);
+        M5.Lcd.println("Card Detected!");
+        
+        M5.Lcd.setTextColor(WHITE);
+        M5.Lcd.println("\nUID:");
+        M5.Lcd.setTextColor(YELLOW);
+        M5.Lcd.setTextSize(2);
+        M5.Lcd.println(uidStr);
+
+        M5.Lcd.setTextColor(WHITE);
+        M5.Lcd.setTextSize(1);
+        M5.Lcd.println("\nType:");
+        M5.Lcd.println(mfrc522.PICC_GetTypeName(piccType));
+    }
+
+    // Halt PICC
+    mfrc522.PICC_HaltA();
+    // Stop encryption on PCD
+    mfrc522.PCD_StopCrypto1();
+    
+    delay(100);
 }
