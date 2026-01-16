@@ -4,7 +4,7 @@
  *
  * Branchement sur connecteur Z (convoyeur):
  *   B-     B+     A-     A+
- *   Noir   Bleu   Vert   Rouge
+ *   Noir   Vert   Bleu   Rouge
  *
  * IMPORTANT: Alimentation externe 9-24V sur le GRBL Module (pas GoPlus2!)
  */
