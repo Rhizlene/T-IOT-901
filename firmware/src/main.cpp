@@ -295,36 +295,59 @@ String readNDEFPayload() {
     if (!rfid.PICC_ReadCardSerial()) return "";
 
     // Buffer pour lire les pages (NTAG213/215/216 = 4 bytes par page)
+    // MIFARE_Read lit 16 bytes (4 pages) a la fois
     byte buffer[18];
     byte bufferSize = sizeof(buffer);
-    String payload = "";
+    String rawData = "";
 
-    // Lire les pages 4 a 15 (donnees utilisateur NDEF)
-    // Page 4 = debut des donnees NDEF apres le header
-    for (byte page = 4; page <= 15; page++) {
+    // Lire les pages 4 a 20 par blocs de 4 pages (16 bytes)
+    // On lit page 4, 8, 12, 16 pour eviter les chevauchements
+    for (byte page = 4; page <= 16; page += 4) {
+        bufferSize = sizeof(buffer);
         byte status = rfid.MIFARE_Read(page, buffer, &bufferSize);
         if (status == rfid.STATUS_OK) {
-            // Chercher le contenu JSON (commence par '{')
-            for (int i = 0; i < 4; i++) {
-                char c = (char)buffer[i];
-                if (c >= 32 && c < 127) {
-                    payload += c;
-                }
+            // Lire les 16 bytes retournes
+            for (int i = 0; i < 16; i++) {
+                rawData += (char)buffer[i];
             }
+        } else {
+            Serial.printf("MIFARE_Read page %d failed: %d\n", page, status);
+            break;
         }
-        bufferSize = sizeof(buffer);
     }
 
     rfid.PICC_HaltA();
     rfid.PCD_StopCrypto1();
 
-    // Nettoyer et extraire le JSON
+    Serial.print("Raw NDEF data (hex): ");
+    for (unsigned int i = 0; i < rawData.length() && i < 64; i++) {
+        Serial.printf("%02X ", (uint8_t)rawData[i]);
+    }
+    Serial.println();
+
+    // Chercher le JSON dans les donnees brutes
+    // Le JSON peut etre prefixe par des headers NDEF (ex: "en" pour Text record)
+    String payload = "";
+    for (unsigned int i = 0; i < rawData.length(); i++) {
+        char c = rawData[i];
+        // Garder uniquement les caracteres imprimables ASCII
+        if (c >= 32 && c < 127) {
+            payload += c;
+        }
+    }
+
+    Serial.println("Filtered payload: " + payload);
+
+    // Extraire le JSON (tout ce qui est entre { et })
     int jsonStart = payload.indexOf('{');
     int jsonEnd = payload.lastIndexOf('}');
     if (jsonStart >= 0 && jsonEnd > jsonStart) {
-        return payload.substring(jsonStart, jsonEnd + 1);
+        String json = payload.substring(jsonStart, jsonEnd + 1);
+        Serial.println("Extracted JSON: " + json);
+        return json;
     }
 
+    Serial.println("No JSON found in NDEF payload");
     return "";
 }
 
@@ -545,19 +568,23 @@ void handleReading() {
     unsigned long start = millis();
     currentUID = "";
     currentProductRef = "";
+    int attempts = 0;
 
     while (millis() - start < RFID_SCAN_TIMEOUT) {
+        attempts++;
+        Serial.printf("Tentative lecture RFID #%d\n", attempts);
+
         // D'abord essayer de lire les donnees NDEF (JSON)
         String ndefPayload = readNDEFPayload();
         if (ndefPayload.length() > 0) {
-            Serial.println("NDEF JSON: " + ndefPayload);
+            Serial.println("NDEF JSON trouve: " + ndefPayload);
 
             // Extraire la reference du JSON
             String ref = extractProductRef(ndefPayload);
             if (ref.length() > 0) {
                 currentProductRef = ref;
-                currentUID = "NDEF";
-                Serial.println("Produit: " + currentProductRef);
+                currentUID = "NDEF:" + ref;
+                Serial.println("Produit extrait: " + currentProductRef);
                 M5.Speaker.tone(1200, 100);
                 displayState();
                 setState(STATE_QUERYING);
@@ -565,10 +592,13 @@ void handleReading() {
             }
         }
 
+        // Petite pause avant de reessayer
+        delay(200);
+
         // Fallback: lire juste l'UID si pas de NDEF
         currentUID = readRFIDTag();
         if (currentUID.length() > 0) {
-            Serial.println("UID: " + currentUID);
+            Serial.println("UID lu: " + currentUID);
             M5.Speaker.tone(1200, 100);
 
             // Utiliser l'UID comme reference par defaut
@@ -578,10 +608,12 @@ void handleReading() {
             setState(STATE_QUERYING);
             return;
         }
-        delay(100);
+
+        delay(300);
     }
 
     // Timeout - tag non lu
+    Serial.printf("RFID: Echec apres %d tentatives\n", attempts);
     lastError = "E030: Tag illisible";
     setState(STATE_ERROR);
 }
