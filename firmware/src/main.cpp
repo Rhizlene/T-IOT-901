@@ -10,6 +10,12 @@
  *   - GRBL Module 13.2 (Moteur @ 0x70)
  *
  * Machine d'etats: INIT -> READY -> DETECTING -> READING -> QUERYING -> ROUTING -> READY
+ *
+ * Logique:
+ *   - Lecture UID RFID
+ *   - Appel API Routing: GET /api/routing/by-rfid/{UID}
+ *   - Reponse: { warehouseId: 1|2|3, store: A|B|C, servoAngle: 5|15|25 }
+ *   - Aiguillage + ejection
  */
 
 #include <M5Stack.h>
@@ -27,9 +33,9 @@
 const char* WIFI_SSID     = "Finv";
 const char* WIFI_PASSWORD = "17082020";
 
-// API Dolibarr
-const char* DOLIBARR_HOST = "172.22.27.165";
-const char* DOLAPIKEY     = "1ZtIVnP5bQ9QMK983qXoii1kd3c72dRQ";
+// API Routing RFID (Node/Express)
+const char* ROUTING_API_HOST = "172.22.27.122";
+const int   ROUTING_API_PORT = 3000;
 
 // Adresses I2C
 #define RFID_I2C_ADDR   0x28
@@ -39,11 +45,11 @@ const char* DOLAPIKEY     = "1ZtIVnP5bQ9QMK983qXoii1kd3c72dRQ";
 // Servo (sur GoPlus2)
 #define SERVO_CH1       0
 
-// Mapping entrepots -> angles servo
-#define WAREHOUSE_A_ANGLE   0    // Entrepot A = gauche
-#define WAREHOUSE_B_ANGLE   90   // Entrepot B = centre
-#define WAREHOUSE_C_ANGLE   180  // Entrepot C = droite
-#define DEFAULT_ANGLE       90   // Position par defaut
+// Mapping entrepots -> angles servo (magasins A/B/C)
+#define WAREHOUSE_A_ANGLE   5
+#define WAREHOUSE_B_ANGLE   15
+#define WAREHOUSE_C_ANGLE   25
+#define DEFAULT_ANGLE       15
 
 // Timeouts (ms)
 #define WIFI_TIMEOUT        20000
@@ -75,11 +81,11 @@ const char* stateNames[] = {
 
 ConveyorState currentState = STATE_INIT;
 String lastError = "";
-String currentUID = "";
-String currentProductRef = "";
-int targetWarehouse = 1;
 
-// Peripheriques
+String currentUID = "";      // UID lu (format "04:82:..." selon MFRC522)
+String currentStore = "";    // "A" / "B" / "C"
+int targetWarehouse = 2;     // 1=A, 2=B, 3=C (B par defaut)
+
 MFRC522 rfid(RFID_I2C_ADDR);
 bool rfidOK = false;
 bool grblOK = false;
@@ -101,6 +107,7 @@ void displayStatus(const char* status, uint16_t color = WHITE) {
 void displayState() {
     M5.Lcd.fillScreen(BLACK);
     M5.Lcd.setTextSize(2);
+
     M5.Lcd.setCursor(10, 10);
     M5.Lcd.setTextColor(CYAN);
     M5.Lcd.println("=== THE CONVEYOR ===");
@@ -111,13 +118,13 @@ void displayState() {
 
     uint16_t stateColor = WHITE;
     switch (currentState) {
-        case STATE_INIT: stateColor = BLUE; break;
-        case STATE_READY: stateColor = GREEN; break;
-        case STATE_DETECTING: stateColor = ORANGE; break;
-        case STATE_READING: stateColor = MAGENTA; break;
-        case STATE_QUERYING: stateColor = CYAN; break;
-        case STATE_ROUTING: stateColor = YELLOW; break;
-        case STATE_ERROR: stateColor = RED; break;
+        case STATE_INIT:      stateColor = BLUE;    break;
+        case STATE_READY:     stateColor = GREEN;   break;
+        case STATE_DETECTING: stateColor = ORANGE;  break;
+        case STATE_READING:   stateColor = MAGENTA; break;
+        case STATE_QUERYING:  stateColor = CYAN;    break;
+        case STATE_ROUTING:   stateColor = YELLOW;  break;
+        case STATE_ERROR:     stateColor = RED;     break;
     }
     M5.Lcd.setTextColor(stateColor);
     M5.Lcd.println(stateNames[currentState]);
@@ -151,6 +158,13 @@ void displayState() {
         M5.Lcd.setTextColor(YELLOW);
         M5.Lcd.print("UID: ");
         M5.Lcd.println(currentUID);
+    }
+
+    if (currentStore.length() > 0) {
+        M5.Lcd.setCursor(10, 180);
+        M5.Lcd.setTextColor(YELLOW);
+        M5.Lcd.print("Magasin: ");
+        M5.Lcd.println(currentStore);
     }
 }
 
@@ -186,16 +200,13 @@ void sendGcode(const char* cmd) {
     Serial.println(cmd);
 
     Wire.beginTransmission(GRBL_I2C_ADDR);
-    for (size_t i = 0; i < strlen(cmd); i++) {
-        Wire.write(cmd[i]);
-    }
+    for (size_t i = 0; i < strlen(cmd); i++) Wire.write(cmd[i]);
     Wire.write('\r');
     Wire.write('\n');
     Wire.endTransmission();
 
     delay(100);
 
-    // Lire reponse
     Wire.requestFrom(GRBL_I2C_ADDR, (uint8_t)32);
     String response = "";
     while (Wire.available()) {
@@ -231,9 +242,8 @@ bool initGRBL() {
 }
 
 void conveyorForward(int distance_mm) {
+    sendGcode("G91");
     char cmd[32];
-    sprintf(cmd, "G91");
-    sendGcode(cmd);
     sprintf(cmd, "G1 Z%d F300", distance_mm);
     sendGcode(cmd);
     sendGcode("G90");
@@ -241,9 +251,8 @@ void conveyorForward(int distance_mm) {
 }
 
 void conveyorBackward(int distance_mm) {
+    sendGcode("G91");
     char cmd[32];
-    sprintf(cmd, "G91");
-    sendGcode(cmd);
     sprintf(cmd, "G1 Z-%d F300", distance_mm);
     sendGcode(cmd);
     sendGcode("G90");
@@ -271,6 +280,7 @@ bool initRFID() {
     return false;
 }
 
+// UID au format "04:82:..."
 String readRFIDTag() {
     if (!rfid.PICC_IsNewCardPresent()) return "";
     if (!rfid.PICC_ReadCardSerial()) return "";
@@ -289,91 +299,8 @@ String readRFIDTag() {
     return uid;
 }
 
-// Lecture des donnees NDEF du tag (pour NTAG/MIFARE Ultralight)
-String readNDEFPayload() {
-    if (!rfid.PICC_IsNewCardPresent()) return "";
-    if (!rfid.PICC_ReadCardSerial()) return "";
-
-    // Buffer pour lire les pages (NTAG213/215/216 = 4 bytes par page)
-    // MIFARE_Read lit 16 bytes (4 pages) a la fois
-    byte buffer[18];
-    byte bufferSize = sizeof(buffer);
-    String rawData = "";
-
-    // Lire les pages 4 a 20 par blocs de 4 pages (16 bytes)
-    // On lit page 4, 8, 12, 16 pour eviter les chevauchements
-    for (byte page = 4; page <= 16; page += 4) {
-        bufferSize = sizeof(buffer);
-        byte status = rfid.MIFARE_Read(page, buffer, &bufferSize);
-        if (status == rfid.STATUS_OK) {
-            // Lire les 16 bytes retournes
-            for (int i = 0; i < 16; i++) {
-                rawData += (char)buffer[i];
-            }
-        } else {
-            Serial.printf("MIFARE_Read page %d failed: %d\n", page, status);
-            break;
-        }
-    }
-
-    rfid.PICC_HaltA();
-    rfid.PCD_StopCrypto1();
-
-    Serial.print("Raw NDEF data (hex): ");
-    for (unsigned int i = 0; i < rawData.length() && i < 64; i++) {
-        Serial.printf("%02X ", (uint8_t)rawData[i]);
-    }
-    Serial.println();
-
-    // Chercher le JSON dans les donnees brutes
-    // Le JSON peut etre prefixe par des headers NDEF (ex: "en" pour Text record)
-    String payload = "";
-    for (unsigned int i = 0; i < rawData.length(); i++) {
-        char c = rawData[i];
-        // Garder uniquement les caracteres imprimables ASCII
-        if (c >= 32 && c < 127) {
-            payload += c;
-        }
-    }
-
-    Serial.println("Filtered payload: " + payload);
-
-    // Extraire le JSON (tout ce qui est entre { et })
-    int jsonStart = payload.indexOf('{');
-    int jsonEnd = payload.lastIndexOf('}');
-    if (jsonStart >= 0 && jsonEnd > jsonStart) {
-        String json = payload.substring(jsonStart, jsonEnd + 1);
-        Serial.println("Extracted JSON: " + json);
-        return json;
-    }
-
-    Serial.println("No JSON found in NDEF payload");
-    return "";
-}
-
-// Extraire la reference produit du JSON NDEF
-String extractProductRef(const String& jsonPayload) {
-    if (jsonPayload.length() == 0) return "";
-
-    JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, jsonPayload);
-
-    if (!error) {
-        // Chercher le champ "ref"
-        if (doc.containsKey("ref")) {
-            String ref = doc["ref"].as<String>();
-            Serial.print("NDEF Ref: ");
-            Serial.println(ref);
-            return ref;
-        }
-    }
-
-    Serial.println("JSON parse error ou champ 'ref' manquant");
-    return "";
-}
-
 // ============================================================================
-// FONCTIONS WIFI
+// WIFI
 // ============================================================================
 
 bool connectWiFi() {
@@ -393,27 +320,37 @@ bool connectWiFi() {
         Serial.println(WiFi.localIP());
         return true;
     }
+
     Serial.println("\nWiFi FAILED");
     return false;
 }
 
 // ============================================================================
-// FONCTIONS API DOLIBARR
+// ROUTING API (RFID -> warehouse)
 // ============================================================================
 
-int queryProductWarehouse(const String& productRef) {
+String normalizeUID(String uid) {
+    uid.trim();
+    uid.toUpperCase();
+    uid.replace(":", "");
+    uid.replace(" ", "");
+    return uid;
+}
+
+int queryWarehouseByUID(const String& uidRaw) {
     if (WiFi.status() != WL_CONNECTED) return -1;
+
+    String uid = normalizeUID(uidRaw);
 
     HTTPClient http;
     String url = "http://";
-    url += DOLIBARR_HOST;
-    url += "/api/index.php/products?DOLAPIKEY=";
-    url += DOLAPIKEY;
-    url += "&sqlfilters=(ref:=:'";
-    url += productRef;
-    url += "')";
+    url += ROUTING_API_HOST;
+    url += ":";
+    url += String(ROUTING_API_PORT);
+    url += "/api/routing/by-rfid/";
+    url += uid;
 
-    Serial.print("API GET: ");
+    Serial.print("ROUTING API GET: ");
     Serial.println(url);
 
     http.begin(url);
@@ -422,52 +359,28 @@ int queryProductWarehouse(const String& productRef) {
 
     if (httpCode == 200) {
         String payload = http.getString();
-        Serial.println("API Response: " + payload.substring(0, 200));
+        Serial.println("Routing API Response: " + payload);
 
         JsonDocument doc;
         DeserializationError error = deserializeJson(doc, payload);
+        if (!error) {
+            int warehouseId = doc["warehouseId"] | -1;
+            const char* store = doc["store"] | "";
 
-        if (!error && doc.is<JsonArray>() && doc.size() > 0) {
-            int warehouseId = doc[0]["fk_default_warehouse"] | 1;
-            Serial.printf("Warehouse ID: %d\n", warehouseId);
+            currentStore = String(store);
+
             http.end();
             return warehouseId;
+        } else {
+            Serial.print("JSON parse error: ");
+            Serial.println(error.c_str());
         }
+    } else {
+        Serial.printf("Routing API Error: %d\n", httpCode);
     }
 
-    Serial.printf("API Error: %d\n", httpCode);
     http.end();
     return -1;
-}
-
-bool postStockMovement(const String& productRef, int warehouseId) {
-    if (WiFi.status() != WL_CONNECTED) return false;
-
-    HTTPClient http;
-    String url = "http://";
-    url += DOLIBARR_HOST;
-    url += "/api/index.php/stockmovements?DOLAPIKEY=";
-    url += DOLAPIKEY;
-
-    http.begin(url);
-    http.addHeader("Content-Type", "application/json");
-
-    JsonDocument doc;
-    doc["product_id"] = productRef;
-    doc["warehouse_id"] = warehouseId;
-    doc["qty"] = 1;
-    doc["type"] = 0;  // 0 = entree
-
-    String json;
-    serializeJson(doc, json);
-
-    Serial.print("API POST: ");
-    Serial.println(json);
-
-    int httpCode = http.POST(json);
-    http.end();
-
-    return (httpCode == 200 || httpCode == 201);
 }
 
 // ============================================================================
@@ -483,12 +396,10 @@ void setState(ConveyorState newState) {
 void handleInit() {
     displayStatus("Initialisation...", BLUE);
 
-    // Init I2C
     Wire.begin(21, 22);
     Wire.setClock(100000);
     delay(100);
 
-    // Scan I2C
     Serial.println("\n=== I2C Scan ===");
     for (uint8_t addr = 1; addr < 127; addr++) {
         Wire.beginTransmission(addr);
@@ -497,21 +408,16 @@ void handleInit() {
         }
     }
 
-    // Init peripheriques
     rfidOK = initRFID();
     grblOK = initGRBL();
     servoOK = initServo();
 
-    // WiFi optionnel - ne bloque pas le demarrage
     displayStatus("Connexion WiFi...", BLUE);
     wifiOK = connectWiFi();
-    if (!wifiOK) {
-        Serial.println("WiFi KO - Mode degrade actif");
-    }
+    if (!wifiOK) Serial.println("WiFi KO - Mode degrade actif");
 
     displayState();
 
-    // WiFi n'est pas requis pour fonctionner (mode degrade)
     if (rfidOK && grblOK && servoOK) {
         setState(STATE_READY);
         M5.Speaker.tone(1000, 100);
@@ -525,30 +431,26 @@ void handleInit() {
 void handleReady() {
     displayStatus("PRET - Attente colis", GREEN);
 
-    // Verifier si un tag RFID est present
     if (rfid.PICC_IsNewCardPresent()) {
         setState(STATE_DETECTING);
     }
 
-    // Bouton A = mode manuel avancer
     if (M5.BtnA.wasPressed()) {
         displayStatus("Manuel: Avancer", YELLOW);
         conveyorForward(50);
     }
 
-    // Bouton B = mode manuel reculer
     if (M5.BtnB.wasPressed()) {
         displayStatus("Manuel: Reculer", YELLOW);
         conveyorBackward(50);
     }
 
-    // Bouton C = test servo
     if (M5.BtnC.wasPressed()) {
         static int testAngle = 0;
-        testAngle = (testAngle + 90) % 270;
+        testAngle = (testAngle + 5) % 31; // petit test fin
         displayStatus("Test Servo", CYAN);
         setServoAngle(SERVO_CH1, testAngle);
-        M5.Speaker.tone(800 + testAngle * 2, 50);
+        M5.Speaker.tone(800 + testAngle * 10, 50);
     }
 }
 
@@ -556,9 +458,7 @@ void handleDetecting() {
     displayStatus("Colis detecte...", ORANGE);
     M5.Speaker.tone(800, 100);
 
-    // Avancer le tapis pour positionner le colis sous le lecteur
     conveyorForward(100);
-
     setState(STATE_READING);
 }
 
@@ -567,74 +467,41 @@ void handleReading() {
 
     unsigned long start = millis();
     currentUID = "";
-    currentProductRef = "";
+    currentStore = "";
     int attempts = 0;
 
     while (millis() - start < RFID_SCAN_TIMEOUT) {
         attempts++;
-        Serial.printf("Tentative lecture RFID #%d\n", attempts);
 
-        // D'abord essayer de lire les donnees NDEF (JSON)
-        String ndefPayload = readNDEFPayload();
-        if (ndefPayload.length() > 0) {
-            Serial.println("NDEF JSON trouve: " + ndefPayload);
-
-            // Extraire la reference du JSON
-            String ref = extractProductRef(ndefPayload);
-            if (ref.length() > 0) {
-                currentProductRef = ref;
-                currentUID = "NDEF:" + ref;
-                Serial.println("Produit extrait: " + currentProductRef);
-                M5.Speaker.tone(1200, 100);
-                displayState();
-                setState(STATE_QUERYING);
-                return;
-            }
-        }
-
-        // Petite pause avant de reessayer
-        delay(200);
-
-        // Fallback: lire juste l'UID si pas de NDEF
         currentUID = readRFIDTag();
         if (currentUID.length() > 0) {
             Serial.println("UID lu: " + currentUID);
             M5.Speaker.tone(1200, 100);
-
-            // Utiliser l'UID comme reference par defaut
-            currentProductRef = "PROD-" + currentUID.substring(0, 8);
-
             displayState();
             setState(STATE_QUERYING);
             return;
         }
 
-        delay(300);
+        delay(250);
     }
 
-    // Timeout - tag non lu
     Serial.printf("RFID: Echec apres %d tentatives\n", attempts);
     lastError = "E030: Tag illisible";
     setState(STATE_ERROR);
 }
 
 void handleQuerying() {
-    displayStatus("Requete API...", CYAN);
+    displayStatus("Routing API...", CYAN);
 
-    // Requete API pour obtenir l'entrepot
-    targetWarehouse = queryProductWarehouse(currentProductRef);
+    targetWarehouse = queryWarehouseByUID(currentUID);
 
     if (targetWarehouse > 0) {
-        Serial.printf("Produit -> Entrepot %d\n", targetWarehouse);
-
-        // Enregistrer mouvement de stock
-        postStockMovement(currentProductRef, targetWarehouse);
-
+        Serial.printf("UID -> Entrepot %d\n", targetWarehouse);
         setState(STATE_ROUTING);
     } else {
-        // Mode degrade: utiliser entrepot par defaut
-        Serial.println("API KO - Mode degrade");
-        targetWarehouse = 1;
+        Serial.println("Routing API KO - Mode degrade (B)");
+        targetWarehouse = 2; // B (centre)
+        currentStore = "B";
         setState(STATE_ROUTING);
     }
 }
@@ -642,31 +509,29 @@ void handleQuerying() {
 void handleRouting() {
     displayStatus("Aiguillage...", YELLOW);
 
-    // Positionner le servo selon l'entrepot
     int angle = DEFAULT_ANGLE;
     switch (targetWarehouse) {
         case 1: angle = WAREHOUSE_A_ANGLE; break;
         case 2: angle = WAREHOUSE_B_ANGLE; break;
         case 3: angle = WAREHOUSE_C_ANGLE; break;
+        default: angle = DEFAULT_ANGLE; break;
     }
 
     Serial.printf("Entrepot %d -> Servo %d deg\n", targetWarehouse, angle);
     setServoAngle(SERVO_CH1, angle);
     delay(500);
 
-    // Ejecter le colis
     displayStatus("Ejection...", GREEN);
     conveyorForward(200);
 
     M5.Speaker.tone(1500, 200);
 
-    // Retour position initiale
     setServoAngle(SERVO_CH1, DEFAULT_ANGLE);
     delay(300);
 
-    // Reset pour prochain colis
     currentUID = "";
-    currentProductRef = "";
+    currentStore = "";
+    targetWarehouse = 2;
 
     setState(STATE_READY);
 }
@@ -677,9 +542,11 @@ void handleError() {
     M5.Lcd.setCursor(10, 10);
     M5.Lcd.setTextColor(RED);
     M5.Lcd.println("=== ERREUR ===");
+
     M5.Lcd.setCursor(10, 50);
     M5.Lcd.setTextColor(WHITE);
     M5.Lcd.println(lastError);
+
     M5.Lcd.setCursor(10, 100);
     M5.Lcd.setTextColor(YELLOW);
     M5.Lcd.println("Btn A: Reset");
@@ -716,7 +583,7 @@ void setup() {
     M5.Lcd.println("Demarrage...");
 
     Serial.println("\n========================================");
-    Serial.println("  THE CONVEYOR - Firmware v1.0");
+    Serial.println("  THE CONVEYOR - Firmware CLEAN (RFID Routing API)");
     Serial.println("  T-IOT-901 EPITECH Marseille");
     Serial.println("========================================\n");
 
