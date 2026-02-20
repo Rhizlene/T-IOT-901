@@ -57,6 +57,10 @@ const int   ROUTING_API_PORT = 3000;
 #define API_TIMEOUT         5000
 #define MOTOR_MOVE_TIME     2000
 
+// Vitesses moteur (mm/min)
+#define CONVEYOR_SLOW_SPEED   80    // Vitesse lente continue (tapis en marche)
+#define CONVEYOR_EJECT_SPEED  3000  // Vitesse d'ejection du colis
+
 // ============================================================================
 // ETATS DE LA MACHINE
 // ============================================================================
@@ -91,6 +95,7 @@ bool rfidOK = false;
 bool grblOK = false;
 bool servoOK = false;
 bool wifiOK = false;
+bool conveyorRunning = false;
 
 // ============================================================================
 // FONCTIONS AFFICHAGE
@@ -241,22 +246,63 @@ bool initGRBL() {
     return false;
 }
 
+// Commande temps-reel GRBL (sans \r\n)
+void sendRealtimeCmd(char cmd) {
+    Wire.beginTransmission(GRBL_I2C_ADDR);
+    Wire.write(cmd);
+    Wire.endTransmission();
+    delay(150);
+}
+
+// Demarrer le tapis en mode continu lent (non bloquant)
+// Appeler uniquement quand GRBL est en etat IDLE (apres conveyorStop ou init)
+void conveyorStartSlow() {
+    char cmd[32];
+    sendGcode("G91");
+    sprintf(cmd, "G1 Z5000 F%d", CONVEYOR_SLOW_SPEED);
+    sendGcode(cmd);
+    sendGcode("G90");
+    conveyorRunning = true;
+    Serial.println("Tapis: DEMARRAGE LENT");
+}
+
+// Arret tapis - soft reset GRBL (vide le buffer et annule tout mouvement)
+void conveyorStop() {
+    sendRealtimeCmd(0x18);  // Ctrl+X : soft reset GRBL
+    delay(800);             // Attendre que GRBL redémarre
+    sendGcode("$X");        // Unlock après reset
+    delay(100);
+    sendGcode("G21");       // Remettre en mode mm
+    sendGcode("G90");       // Remettre en mode absolu
+    conveyorRunning = false;
+    Serial.println("Tapis: STOP (Soft Reset)");
+}
+
 void conveyorForward(int distance_mm) {
     sendGcode("G91");
     char cmd[32];
-    sprintf(cmd, "G1 Z%d F300", distance_mm);
+    sendGcode("G91");
+    sprintf(cmd, "G1 Z%d F%d", distance_mm, CONVEYOR_EJECT_SPEED);
     sendGcode(cmd);
     sendGcode("G90");
-    delay(MOTOR_MOVE_TIME);
+    // Delai calcule : (distance / vitesse) * 60s * 1000ms + 20% de marge
+    int moveTime = (int)((float)distance_mm / CONVEYOR_EJECT_SPEED * 60000.0f * 1.2f);
+    if (moveTime < 500) moveTime = 500;
+    Serial.printf("conveyorForward: %dmm, attente %dms\n", distance_mm, moveTime);
+    delay(moveTime);
 }
 
 void conveyorBackward(int distance_mm) {
     sendGcode("G91");
     char cmd[32];
-    sprintf(cmd, "G1 Z-%d F300", distance_mm);
+    sendGcode("G91");
+    sprintf(cmd, "G1 Z-%d F%d", distance_mm, CONVEYOR_EJECT_SPEED);
     sendGcode(cmd);
     sendGcode("G90");
-    delay(MOTOR_MOVE_TIME);
+    int moveTime = (int)((float)distance_mm / CONVEYOR_EJECT_SPEED * 60000.0f * 1.2f);
+    if (moveTime < 500) moveTime = 500;
+    Serial.printf("conveyorBackward: %dmm, attente %dms\n", distance_mm, moveTime);
+    delay(moveTime);
 }
 
 // ============================================================================
@@ -429,22 +475,37 @@ void handleInit() {
 }
 
 void handleReady() {
-    displayStatus("PRET - Attente colis", GREEN);
-
-    if (rfid.PICC_IsNewCardPresent()) {
-        setState(STATE_DETECTING);
+    // Demarrer le tapis lentement si pas deja en marche
+    if (!conveyorRunning) {
+        conveyorStartSlow();
+        displayStatus("PRET - Tapis en marche", GREEN);
     }
 
+    // Scanner RFID pendant que le tapis tourne
+    if (rfid.PICC_IsNewCardPresent()) {
+        conveyorStop();
+        M5.Speaker.tone(800, 100);
+        setState(STATE_READING);
+        return;
+    }
+
+    // Bouton A = arret + avancer manuellement
     if (M5.BtnA.wasPressed()) {
+        if (conveyorRunning) conveyorStop();
         displayStatus("Manuel: Avancer", YELLOW);
         conveyorForward(50);
+        conveyorRunning = false;  // Sera redemarré au prochain cycle
     }
 
+    // Bouton B = arret + reculer manuellement
     if (M5.BtnB.wasPressed()) {
+        if (conveyorRunning) conveyorStop();
         displayStatus("Manuel: Reculer", YELLOW);
         conveyorBackward(50);
+        conveyorRunning = false;
     }
 
+    // Bouton C = test servo (sans arreter le tapis)
     if (M5.BtnC.wasPressed()) {
         static int testAngle = 0;
         testAngle = (testAngle + 5) % 31; // petit test fin
@@ -455,10 +516,8 @@ void handleReady() {
 }
 
 void handleDetecting() {
-    displayStatus("Colis detecte...", ORANGE);
-    M5.Speaker.tone(800, 100);
-
-    conveyorForward(100);
+    // Cet etat n'est plus utilise dans le flux principal
+    // Le tapis roule en continu et la detection se fait dans handleReady()
     setState(STATE_READING);
 }
 
@@ -519,19 +578,24 @@ void handleRouting() {
 
     Serial.printf("Entrepot %d -> Servo %d deg\n", targetWarehouse, angle);
     setServoAngle(SERVO_CH1, angle);
-    delay(500);
+    delay(500);  // Laisser le servo atteindre la position
 
+    // Ejecter le colis a vitesse normale
     displayStatus("Ejection...", GREEN);
-    conveyorForward(200);
+    conveyorForward(300);
 
     M5.Speaker.tone(1500, 200);
 
+    // Retour servo en position neutre apres ejection
     setServoAngle(SERVO_CH1, DEFAULT_ANGLE);
     delay(300);
 
     currentUID = "";
     currentStore = "";
     targetWarehouse = 2;
+
+    // Le tapis sera redemarré lentement dans handleReady()
+    conveyorRunning = false;
 
     setState(STATE_READY);
 }
