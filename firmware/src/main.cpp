@@ -58,8 +58,12 @@ const int   ROUTING_API_PORT = 3000;
 #define MOTOR_MOVE_TIME     2000
 
 // Vitesses moteur (mm/min)
-#define CONVEYOR_SLOW_SPEED   80    // Vitesse lente continue (tapis en marche)
+#define CONVEYOR_SLOW_SPEED   20    // Vitesse lente continue (tapis en marche)
 #define CONVEYOR_EJECT_SPEED  3000  // Vitesse d'ejection du colis
+
+// Servo timing (ms)
+#define SERVO_MOVE_DELAY      500   // Temps pour que le servo atteigne sa position
+#define SERVO_HOLD_TIME       10000  // Temps de maintien du servo pendant le passage du colis
 
 // ============================================================================
 // ETATS DE LA MACHINE
@@ -232,7 +236,9 @@ bool initGRBL() {
         delay(200);
         sendGcode("$102=80");      // Z steps/mm
         delay(100);
-        sendGcode("$112=500");     // Z max rate
+        sendGcode("$112=500");     // Z max rate mm/min
+        delay(100);
+        sendGcode("$122=50");      // Z acceleration mm/sec^2 (evite les vibrations)
         delay(100);
         sendGcode("G21");          // Millimeters
         delay(100);
@@ -272,6 +278,8 @@ void conveyorStop() {
     delay(800);             // Attendre que GRBL redémarre
     sendGcode("$X");        // Unlock après reset
     delay(100);
+    sendGcode("$122=50");   // Reconfirmer acceleration (anti-vibrations)
+    delay(100);
     sendGcode("G21");       // Remettre en mode mm
     sendGcode("G90");       // Remettre en mode absolu
     conveyorRunning = false;
@@ -279,17 +287,12 @@ void conveyorStop() {
 }
 
 void conveyorForward(int distance_mm) {
-    sendGcode("G91");
     char cmd[32];
     sendGcode("G91");
     sprintf(cmd, "G1 Z%d F%d", distance_mm, CONVEYOR_EJECT_SPEED);
     sendGcode(cmd);
     sendGcode("G90");
-    // Delai calcule : (distance / vitesse) * 60s * 1000ms + 20% de marge
-    int moveTime = (int)((float)distance_mm / CONVEYOR_EJECT_SPEED * 60000.0f * 1.2f);
-    if (moveTime < 500) moveTime = 500;
-    Serial.printf("conveyorForward: %dmm, attente %dms\n", distance_mm, moveTime);
-    delay(moveTime);
+    Serial.printf("conveyorForward: %dmm (non-bloquant)\n", distance_mm);
 }
 
 void conveyorBackward(int distance_mm) {
@@ -483,7 +486,7 @@ void handleReady() {
 
     // Scanner RFID pendant que le tapis tourne
     if (rfid.PICC_IsNewCardPresent()) {
-        conveyorStop();
+        // Tag detecte -> on passe directement en lecture (tapis tourne encore)
         M5.Speaker.tone(800, 100);
         setState(STATE_READING);
         return;
@@ -494,7 +497,7 @@ void handleReady() {
         if (conveyorRunning) conveyorStop();
         displayStatus("Manuel: Avancer", YELLOW);
         conveyorForward(50);
-        conveyorRunning = false;  // Sera redemarré au prochain cycle
+        conveyorRunning = false;
     }
 
     // Bouton B = arret + reculer manuellement
@@ -508,7 +511,7 @@ void handleReady() {
     // Bouton C = test servo (sans arreter le tapis)
     if (M5.BtnC.wasPressed()) {
         static int testAngle = 0;
-        testAngle = (testAngle + 5) % 31; // petit test fin
+        testAngle = (testAngle + 5) % 31;
         displayStatus("Test Servo", CYAN);
         setServoAngle(SERVO_CH1, testAngle);
         M5.Speaker.tone(800 + testAngle * 10, 50);
@@ -536,6 +539,11 @@ void handleReading() {
         if (currentUID.length() > 0) {
             Serial.println("UID lu: " + currentUID);
             M5.Speaker.tone(1200, 100);
+
+            // Arreter le tapis MAINTENANT (juste avant l'appel API)
+            conveyorStop();
+            displayStatus("Tag lu - Appel API...", CYAN);
+
             displayState();
             setState(STATE_QUERYING);
             return;
@@ -563,6 +571,9 @@ void handleQuerying() {
         currentStore = "B";
         setState(STATE_ROUTING);
     }
+
+    // Reponse API recue -> passer directement au routing (redemarrage tapis)
+    setState(STATE_ROUTING);
 }
 
 void handleRouting() {
@@ -576,27 +587,32 @@ void handleRouting() {
         default: angle = DEFAULT_ANGLE; break;
     }
 
-    Serial.printf("Entrepot %d -> Servo %d deg\n", targetWarehouse, angle);
+    // 1. Positionner le servo AVANT de redemarrer le tapis
+    Serial.printf("Entrepot %d (%s) -> Servo %d deg\n", targetWarehouse, currentStore.c_str(), angle);
     setServoAngle(SERVO_CH1, angle);
-    delay(500);  // Laisser le servo atteindre la position
+    delay(SERVO_MOVE_DELAY);  // 500ms pour que le servo atteigne sa position
 
-    // Ejecter le colis a vitesse normale
-    displayStatus("Ejection...", GREEN);
-    conveyorForward(300);
-
+    // 2. Redemarrer le tapis IMMEDIATEMENT des reception reponse API
+    //    Pas de timer : le redemarrage est directement lie a la reponse API
+    String label = "Entrepot " + currentStore;
+    displayStatus(label.c_str(), GREEN);
+    conveyorStartSlow();      // Demarrage lent - tapis repart sans delai
     M5.Speaker.tone(1500, 200);
 
-    // Retour servo en position neutre apres ejection
+    // 3. Laisser le colis passer devant l'aiguillage
+    delay(10000);  // 10s - le colis a le temps de passer avant retour servo
+
+    // 4. Remettre le servo en position neutre apres le passage du colis
+    Serial.println("Servo -> position neutre");
     setServoAngle(SERVO_CH1, DEFAULT_ANGLE);
-    delay(300);
+    delay(SERVO_MOVE_DELAY);  // 500ms pour que le servo revienne
 
     currentUID = "";
     currentStore = "";
     targetWarehouse = 2;
 
-    // Le tapis sera redemarré lentement dans handleReady()
-    conveyorRunning = false;
-
+    // conveyorRunning deja true (set dans conveyorStartSlow)
+    // handleReady ne relancera pas le tapis puisque conveyorRunning == true
     setState(STATE_READY);
 }
 
