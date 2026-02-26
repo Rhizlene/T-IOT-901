@@ -55,7 +55,7 @@ echo.
 echo Flashage en cours... Ne debranchez pas l'ESP32 !
 echo.
 
-python -m esptool --port %COM_PORT% --baud 921600 write_flash 0x1000 "%BIN_FILE%"
+python -m esptool --port %COM_PORT% --baud 921600 write_flash 0x0 "%BIN_FILE%"
 
 if errorlevel 1 (
     echo.
