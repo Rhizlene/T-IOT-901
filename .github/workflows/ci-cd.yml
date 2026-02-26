@@ -88,6 +88,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build, test]
     if: startsWith(github.ref, 'refs/tags/v')  # Seulement pour les tags
+    permissions:
+      contents: write
     
     steps:
       - name: Checkout
