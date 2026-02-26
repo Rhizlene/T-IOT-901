@@ -31,19 +31,19 @@ if errorlevel 1 (
 )
 
 :: Installe esptool si absent
-esptool.py version >nul 2>&1
+python -m esptool version >nul 2>&1
 if errorlevel 1 (
     echo Installation de esptool...
     pip install esptool
 )
 
 echo.
-echo Branchez l'ESP32 en USB puis appuyez sur une touche...
-pause >nul
+echo Branchez l'ESP32 en USB puis appuyez sur ENTREE...
+set /p DUMMY=
 
-:: Detecte le port COM automatiquement
+:: Detecte le port COM automatiquement via PowerShell
 echo Detection du port...
-for /f "tokens=2 delims==" %%a in ('wmic path Win32_SerialPort where "Description like '%%CP210%%' or Description like '%%CH340%%' or Description like '%%FTDI%%'" get DeviceID /value 2^>nul') do set COM_PORT=%%a
+for /f "usebackq delims=" %%a in (`powershell -NoProfile -Command "Get-PnpDevice -Class Ports -Status OK | Where-Object {$_.FriendlyName -match 'CP210|CH340|FTDI|Silicon'} | ForEach-Object {($_.FriendlyName -replace '.*\((COM\d+)\).*','$1')} | Select-Object -First 1"`) do set COM_PORT=%%a
 
 if "%COM_PORT%"=="" (
     echo Port non detecte automatiquement.
@@ -55,7 +55,7 @@ echo.
 echo Flashage en cours... Ne debranchez pas l'ESP32 !
 echo.
 
-esptool.py --port %COM_PORT% --baud 921600 write_flash 0x1000 "%BIN_FILE%"
+python -m esptool --port %COM_PORT% --baud 921600 write_flash 0x1000 "%BIN_FILE%"
 
 if errorlevel 1 (
     echo.
