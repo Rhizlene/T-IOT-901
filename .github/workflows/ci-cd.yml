@@ -25,29 +25,29 @@ jobs:
   # JOB 1 : Build (CI)
   # ===========================================================================
   build:
-    name: 🔨 Build Firmware
+    name: Build Firmware
     runs-on: ubuntu-latest
     
     steps:
-      - name: 📥 Checkout
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 🐍 Setup Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: 📦 Install PlatformIO
+      - name: Install PlatformIO
         run: |
           pip install --upgrade pip
           pip install platformio
 
-      - name: 🔨 Compile firmware
+      - name: Compile firmware
         run: |
           cd firmware
           pio run
 
-      - name: 📤 Upload binary artifact
+      - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: firmware-bin
@@ -58,83 +58,99 @@ jobs:
   # JOB 2 : Tests (CI)
   # ===========================================================================
   test:
-    name: 🧪 Unit Tests
+    name: Unit Tests
     runs-on: ubuntu-latest
     needs: build
     
     steps:
-      - name: 📥 Checkout
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 🐍 Setup Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: 📦 Install PlatformIO
+      - name: Install PlatformIO
         run: pip install platformio
 
-      - name: 🧪 Run tests
+      - name: Run tests
         run: |
           cd firmware
-          pio test -e native || echo "⚠️ Pas de tests natifs configurés"
+          pio test -e native || echo " Pas de tests natifs configurés"
         continue-on-error: true
 
   # ===========================================================================
   # JOB 3 : Release (CD) - Uniquement sur les tags v*
   # ===========================================================================
   release:
-    name: 🚀 Create Release
+    name: Create Release
     runs-on: ubuntu-latest
     needs: [build, test]
     if: startsWith(github.ref, 'refs/tags/v')  # Seulement pour les tags
+    permissions:
+      contents: write
     
     steps:
-      - name: 📥 Checkout
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 🐍 Setup Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: 📦 Install PlatformIO
-        run: pip install platformio
+      - name: Install PlatformIO
+        run: pip install platformio esptool
 
-      - name: 🔨 Build release
+      - name: Build release
         run: |
           cd firmware
           pio run
 
-      - name: 📋 Prepare files
+      - name: Prepare files
         run: |
           mkdir -p release
           VERSION=${GITHUB_REF#refs/tags/}
-          
-          # Copier et renommer le binaire
-          find firmware/.pio/build -name "*.bin" -exec cp {} release/ \;
-          for f in release/*.bin; do
-            [ -f "$f" ] && mv "$f" "release/conveyor_${VERSION}.bin"
-          done
-          
+          BUILD_DIR=$(find firmware/.pio/build -name "firmware.bin" | head -1 | xargs dirname)
+
+          # Fusionner bootloader + partitions + firmware en un seul .bin
+          python -m esptool --chip esp32 merge_bin \
+            -o "release/conveyor_${VERSION}.bin" \
+            --flash_mode dio \
+            --flash_freq 40m \
+            --flash_size 4MB \
+            0x1000  "${BUILD_DIR}/bootloader.bin" \
+            0x8000  "${BUILD_DIR}/partitions.bin" \
+            0x10000 "${BUILD_DIR}/firmware.bin"
+
           # Config exemple
           if [ -f "firmware/data/config.json" ]; then
             cp firmware/data/config.json release/config_example.json
           fi
+
+          # Script de flash pour le client
+          cp flash.bat release/flash.bat
           
           ls -la release/
 
-      - name: 🚀 Create GitHub Release
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
           files: release/*
           generate_release_notes: true
           body: |
-            ## 📦 Firmware ${{ github.ref_name }}
+            ## Firmware ${{ github.ref_name }}
 
-            ### Installation
+            ### Installation rapide (Windows)
+            1. Téléchargez `conveyor_${{ github.ref_name }}.bin` et `flash.bat`
+            2. Placez les deux fichiers dans le même dossier
+            3. Branchez l'ESP32 en USB
+            4. Double-cliquez sur `flash.bat`
+
+            ### Installation manuelle
             ```bash
-            esptool.py write_flash 0x10000 conveyor_${{ github.ref_name }}.bin
+            esptool.py --port COM11 --baud 921600 write_flash 0x1000 conveyor_${{ github.ref_name }}.bin
             ```
             Ou : `pio run --target upload`
         env:
